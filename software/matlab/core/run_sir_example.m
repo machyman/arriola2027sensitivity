@@ -11,7 +11,7 @@
 %     5. Solves the SIR ODE and plots the epidemic curve (Chapter 4 setup)
 %
 %   Run this script from the repository root:
-%       cd arriola2026sa
+%       cd arriola2027sensitivity
 %       addpath(genpath('software/matlab'))
 %       run_sir_example
 %
