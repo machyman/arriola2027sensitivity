@@ -1,0 +1,181 @@
+%TEST_CORE  Test suite for the core sensitivity analysis library.
+%   Tests sir_nominal, sir_model, sensitivity_index, sensitivity_jacobian,
+%   and tornado_plot against known analytical results.
+%
+%   Run from the repository root:
+%       addpath(genpath('software/matlab'))
+%       test_core
+%
+%   All tests use assert() for automated checking.  A passing run prints
+%   "ALL TESTS PASSED" with no error output.
+
+n_tests = 16;   %% single source: header and summary must agree
+fprintf('=== test_core: Running %d tests ===\n\n', n_tests);
+n_pass = 0;
+tol    = 1e-6;   % tolerance for numerical comparisons
+
+%% ====================================================================
+%% BLOCK 1: sir_nominal
+%% ====================================================================
+fprintf('Block 1: sir_nominal...\n');
+
+p = sir_nominal();
+
+%T1.1: struct has required fields
+required = {'c','beta','tau_R','tau_m','N','S0','I0','R0_ic','T','gamma_R','nu_m','R0'};
+for i = 1:length(required)
+    assert(isfield(p, required{i}), 'Missing field: %s', required{i});
+end
+n_pass = n_pass + 1; fprintf('  T1.1 PASS: all fields present\n');
+
+%T1.2: R0 consistency
+assert(abs(p.R0 - p.c*p.beta/(p.gamma_R + p.nu_m)) < 1e-14, 'R0 inconsistent');
+n_pass = n_pass + 1; fprintf('  T1.2 PASS: R0 = c*beta/(gamma_R+nu_m) = %.4f\n', p.R0);
+
+%T1.3: derived quantities
+assert(abs(p.gamma_R - 1/p.tau_R) < 1e-14, 'gamma_R inconsistent');
+assert(abs(p.nu_m    - 1/p.tau_m)   < 1e-14, 'nu_m inconsistent');
+n_pass = n_pass + 1; fprintf('  T1.3 PASS: gamma_R and nu_m consistent\n');
+
+%T1.4: population conservation check
+assert(p.S0 + p.I0 + p.R0_ic == p.N, 'S0+I0+R0_ic must equal N');
+n_pass = n_pass + 1; fprintf('  T1.4 PASS: S0+I0+R0_ic = N\n');
+
+%% ====================================================================
+%% BLOCK 2: sir_model
+%% ====================================================================
+fprintf('\nBlock 2: sir_model...\n');
+
+%T2.1: output is 3x1
+y0 = [p.S0; p.I0; p.R0_ic];
+dy = sir_model(0, y0, p.c, p.beta, p.tau_R, p.tau_m);
+assert(isequal(size(dy), [3 1]), 'Output must be 3x1');
+n_pass = n_pass + 1; fprintf('  T2.1 PASS: output is 3x1\n');
+
+%T2.2: population conservation (dS+dI+dR = 0 for closed population)
+% With demography: nu_m*N is born, nu_m*(S+I+R) die, net = 0
+dy_sum = sum(dy);
+assert(abs(dy_sum) < 1e-10, 'dS+dI+dR = %.2e (should be ~0)', dy_sum);
+n_pass = n_pass + 1; fprintf('  T2.2 PASS: population conserved (dS+dI+dR = %.2e)\n', dy_sum);
+
+%T2.3: disease-free equilibrium (I=0 -> dI/dt = 0, dS/dt = 0 at S=N)
+dy_dfe = sir_model(0, [p.N; 0; 0], p.c, p.beta, p.tau_R, p.tau_m);
+assert(abs(dy_dfe(1)) < 1e-10, 'At DFE: dS/dt should be 0');
+assert(abs(dy_dfe(2)) < 1e-10, 'At DFE: dI/dt should be 0');
+n_pass = n_pass + 1; fprintf('  T2.3 PASS: disease-free equilibrium is correct\n');
+
+%T2.4: row input handled (MLS robustness requirement)
+dy_row = sir_model(0, y0', p.c, p.beta, p.tau_R, p.tau_m);
+assert(isequal(dy_row, dy), 'Row vs column input should give same result');
+n_pass = n_pass + 1; fprintf('  T2.4 PASS: row/column input consistency\n');
+
+%% ====================================================================
+%% BLOCK 3: sensitivity_index
+%% ====================================================================
+fprintf('\nBlock 3: sensitivity_index...\n');
+
+%T3.1: SI_tau_R(R0) = 1 (analytic)
+R0_nom = p.R0;
+h      = 1e-5 * p.tau_R;
+% R0_p MUST use the same formula as p.R0, or the finite difference measures
+% the formula mismatch instead of the derivative.
+gamma_R_p = 1 / (p.tau_R + h);
+R0_p    = p.c * p.beta / (gamma_R_p + p.nu_m);
+SI_tau_R  = sensitivity_index(R0_p, R0_nom, p.tau_R + h, p.tau_R);
+SI_tau_R_exact = p.tau_m / (p.tau_m + p.tau_R);          % = 0.99930 for tau_m = 10,000
+assert(abs(SI_tau_R - SI_tau_R_exact) < 1e-4, ...
+       'SI_tau_R(R0) should be %.5f, got %.8f', SI_tau_R_exact, SI_tau_R);
+n_pass = n_pass + 1; fprintf('  T3.1 PASS: SI_tau_R(R0) = %.8f (exact: %.5f)\n', SI_tau_R, SI_tau_R_exact);
+
+%T3.2: SI_tau_m(R0) = tau_R/(tau_m+tau_R), small but NOT zero under demography
+% nu_m = 1/tau_m enters R0 through (gamma_R + nu_m), so R0 DOES change with tau_m.
+tau_m_p    = p.tau_m * 1.0001;       % small step: a 1% step in tau_m is too coarse here
+R0_tau_m_p  = p.c * p.beta / (p.gamma_R + 1/tau_m_p);
+SI_tau_m   = sensitivity_index(R0_tau_m_p, R0_nom, tau_m_p, p.tau_m);
+SI_tau_m_exact = p.tau_R / (p.tau_m + p.tau_R);          % = 6.9951e-04
+assert(abs(SI_tau_m - SI_tau_m_exact) < 1e-5, ...
+       'SI_tau_m(R0) should be %.5e, got %.5e', SI_tau_m_exact, SI_tau_m);
+n_pass = n_pass + 1; fprintf('  T3.2 PASS: SI_tau_m(R0) = %.4e (exact: %.4e)\n', SI_tau_m, SI_tau_m_exact);
+
+%T3.3: dimension mismatch error
+try
+    sensitivity_index([1;2], 1.0, [1;2;3], 1.0);
+    error('Should have thrown DimensionMismatch');
+catch ME
+    assert(contains(ME.identifier,'DimensionMismatch'), ...
+           'Wrong error: %s', ME.identifier);
+end
+n_pass = n_pass + 1; fprintf('  T3.3 PASS: dimension mismatch caught correctly\n');
+
+%% ====================================================================
+%% BLOCK 4: sensitivity_jacobian
+%% ====================================================================
+fprintf('\nBlock 4: sensitivity_jacobian...\n');
+
+%T4.1: known analytic result: R0 = c*beta*tau_R, all SIs = 1 except tau_m
+R0_fn    = @(pv) pv(1)*pv(2)*pv(3);   % ignores tau_m = pv(4)
+p_vec    = [p.c; p.beta; p.tau_R; p.tau_m];
+[S4, i4] = sensitivity_jacobian(R0_fn, p_vec, 1);
+
+assert(abs(S4(1) - 1.0) < tol, 'SI_c = %.8f, expected 1', S4(1));
+assert(abs(S4(2) - 1.0) < tol, 'SI_beta = %.8f, expected 1', S4(2));
+assert(abs(S4(3) - 1.0) < tol, 'SI_tau_R = %.8f, expected 1', S4(3));
+assert(abs(S4(4) - 0.0) < tol, 'SI_tau_m = %.2e, expected 0', S4(4));
+n_pass = n_pass + 1;
+fprintf('  T4.1 PASS: R0 Jacobian [%.6f %.6f %.6f %.6f] (exact: [1 1 1 0])\n',...
+        S4(1),S4(2),S4(3),S4(4));
+
+%T4.2: evaluation count = 2*n_p + 1
+assert(i4.n_evals == 2*4+1, 'Expected %d evals, got %d', 2*4+1, i4.n_evals);
+n_pass = n_pass + 1; fprintf('  T4.2 PASS: evaluation count = %d\n', i4.n_evals);
+
+%T4.3: multi-QOI — f(p) = [p1^2; p1*p2], p = [2; 3]
+%  dq1/dp1 = 2*p1=4, dq2/dp1 = p2=3, dq2/dp2 = p1=2
+%  SI_p1^q1 = (p1/q1)*dq1/dp1 = (2/4)*4 = 2
+%  SI_p1^q2 = (p1/q2)*dq2/dp1 = (2/6)*3 = 1
+%  SI_p2^q1 = 0
+%  SI_p2^q2 = (p2/q2)*dq2/dp2 = (3/6)*2 = 1
+multi_fn = @(pv) [pv(1)^2; pv(1)*pv(2)];
+[S_multi, ~] = sensitivity_jacobian(multi_fn, [2;3], 2);
+assert(abs(S_multi(1,1) - 2) < tol, 'S(1,1) should be 2');
+assert(abs(S_multi(1,2) - 0) < tol, 'S(1,2) should be 0');
+assert(abs(S_multi(2,1) - 1) < tol, 'S(2,1) should be 1');
+assert(abs(S_multi(2,2) - 1) < tol, 'S(2,2) should be 1');
+n_pass = n_pass + 1;
+fprintf('  T4.3 PASS: multi-QOI Jacobian correct\n');
+
+%% ====================================================================
+%% BLOCK 5: tornado_plot (visual; test that it runs without error)
+%% ====================================================================
+fprintf('\nBlock 5: tornado_plot...\n');
+
+%T5.1: basic call succeeds
+try
+    h_fig = tornado_plot([1;1;-1;0], {'$c$','$\beta$','$\tau_R$','$\tau_m$'}, 'R_0');
+    assert(isgraphics(h_fig), 'Should return a figure handle');
+    close(h_fig);
+    n_pass = n_pass + 1; fprintf('  T5.1 PASS: basic tornado plot created\n');
+catch ME
+    fprintf('  T5.1 FAIL: %s\n', ME.message);
+end
+
+%T5.2: label mismatch error caught
+try
+    tornado_plot([1;2], {'only one label'}, 'Q');
+    fprintf('  T5.2 FAIL: should have thrown error\n');
+catch ME
+    assert(contains(ME.identifier, 'LabelMismatch'));
+    n_pass = n_pass + 1; fprintf('  T5.2 PASS: label mismatch caught\n');
+end
+
+%% ====================================================================
+%% SUMMARY
+%% ====================================================================
+%% The suite contains 16 tests (T1.1-T1.4, T2.1-T2.4, T3.1-T3.3,
+%% T4.1-T4.3, T5.1-T5.2) and increments n_pass once per test.
+fprintf('\n=== SUMMARY: %d/%d tests passed ===\n', n_pass, n_tests);
+if n_pass == n_tests
+    fprintf('ALL TESTS PASSED.\n');
+else
+    fprintf('WARNING: %d test(s) failed.\n', n_tests - n_pass);
+end

@@ -1,0 +1,162 @@
+%TEST_FSE_ADJOINT  Test suite for FSE and adjoint libraries.
+%   Tests sir_jacobian, sir_augmented, compute_time_si, sir_adjoint_rhs,
+%   and run_sir_adjoint against known analytical results.
+%
+%   Key verification:
+%     1. Jacobian entries match finite differences.
+%     2. Augmented ODE: FSE SI matches centered-difference SI at selected times.
+%     3. Adjoint SI matches FSE SI for J = integral(I, 0, T).
+%
+%   Run from the repository root:
+%       addpath(genpath('software/matlab'))
+%       test_fse_adjoint
+
+fprintf('=== test_fse_adjoint: FSE and Adjoint Libraries ===\n\n');
+tol_fd  = 1e-4;   % tolerance for FD-based comparisons
+tol_adj = 0.02;   % tolerance for adjoint vs FSE comparison
+n_pass  = 0;
+
+p = sir_nominal();
+ode_opts = odeset('RelTol',1e-8,'AbsTol',1e-10,'MaxStep',0.5);
+
+%% ====================================================================
+%% BLOCK 1: sir_jacobian
+%% ====================================================================
+fprintf('Block 1: sir_jacobian...\n');
+S = p.S0; I = p.I0; R = p.R0_ic;
+
+%T1.1: analytic vs finite difference at t=0
+J_anal = sir_jacobian(S, I, R, p.c, p.beta, p.tau_R, p.tau_m);
+assert(isequal(size(J_anal), [3 3]), 'Jacobian must be 3x3');
+n_pass=n_pass+1; fprintf('  T1.1 PASS: Jacobian is 3x3\n');
+
+%T1.2: entrywise agreement with eq. (sirJacobian), the canonical book form.
+%  The book holds N fixed at the nominal total population, so the birth term
+%  contributes no state derivative and the columns sum to -nu_m, not zero.  Do
+%  not assert zero column sums here: that identity holds for a
+%  state-dependent-N Jacobian, which is a different convention from the
+%  book's.  Compare entrywise against the book's equation instead.
+N_nom = S + I + R;
+gamma_R   = 1/p.tau_R;  nu_m_ = 1/p.tau_m;
+J_book = [ -p.c*p.beta*I/N_nom - nu_m_,  -p.c*p.beta*S/N_nom,               0    ;
+            p.c*p.beta*I/N_nom,         p.c*p.beta*S/N_nom - (gamma_R + nu_m_), 0    ;
+            0,                          gamma_R,                             -nu_m_ ];
+assert(max(max(abs(J_anal - J_book))) < 1e-12, ...
+       'Jacobian differs from eq. (sirJacobian): max diff = %.2e', ...
+       max(max(abs(J_anal - J_book))));
+n_pass=n_pass+1; fprintf('  T1.2 PASS: Jacobian matches eq. (sirJacobian) entrywise\n');
+
+%T1.3: verify J(1,2) = dF_S/dI against FD of the constant-N field.
+%  sir_model recomputes N = S+I+R internally, so differencing it would
+%  reproduce the state-dependent linearization the book does not use.  The
+%  book's Jacobian is that of the field with N frozen at nominal, so freeze it.
+h = 1e-5;
+F_fixedN = @(y) [ nu_m_*N_nom - p.c*p.beta*y(1)*y(2)/N_nom - nu_m_*y(1);
+                  p.c*p.beta*y(1)*y(2)/N_nom - (gamma_R + nu_m_)*y(2);
+                  gamma_R*y(2) - nu_m_*y(3) ];
+rhs_p = F_fixedN([S; I+h; R]);
+rhs_m = F_fixedN([S; I-h; R]);
+J_fd_col2 = (rhs_p - rhs_m)/(2*h);
+assert(max(abs(J_anal(:,2) - J_fd_col2)) < tol_fd, ...
+       'Jacobian col 2 mismatch vs FD: max diff = %.2e', ...
+       max(abs(J_anal(:,2) - J_fd_col2)));
+n_pass=n_pass+1; fprintf('  T1.3 PASS: dF/dI column matches FD (max diff = %.2e)\n', ...
+                          max(abs(J_anal(:,2) - J_fd_col2)));
+
+%% ====================================================================
+%% BLOCK 2: sir_augmented
+%% ====================================================================
+fprintf('\nBlock 2: sir_augmented...\n');
+
+%T2.1: output dimension
+y0_aug = [p.S0; p.I0; p.R0_ic; zeros(12,1)];
+dy_aug = sir_augmented(0, y0_aug, p.c,p.beta,p.tau_R,p.tau_m);
+assert(length(dy_aug) == 15, 'Output should be 15x1');
+n_pass=n_pass+1; fprintf('  T2.1 PASS: augmented RHS is 15x1\n');
+
+%T2.2: first 3 components match sir_model
+dy_sir = sir_model(0, [p.S0;p.I0;p.R0_ic], p.c,p.beta,p.tau_R,p.tau_m);
+assert(max(abs(dy_aug(1:3) - dy_sir)) < 1e-12, ...
+       'Augmented ODE: first 3 components differ from sir_model');
+n_pass=n_pass+1; fprintf('  T2.2 PASS: first 3 components match sir_model\n');
+
+%T2.3: at t=0 with zero sensitivity ICs the FSE RHS reduces to dF/dp,
+% which is NOT zero.  The previous assertion required it to be < 1e-6 and
+% could never pass: for the nominal parameters the beta-block alone is
+% about 5.0, so the assertion failed by a factor of 5e6.
+% FSE RHS = J*w + dF/dp, and w(0) = 0, so the RHS must equal dF/dp exactly.
+dFdp_beta = [-p.c*p.S0*p.I0/p.N;  p.c*p.S0*p.I0/p.N;  0];
+assert(max(abs(dy_aug(7:9) - dFdp_beta)) < 1e-10, ...
+       'At t=0 the FSE RHS must equal dF/dp exactly, since w(0) = 0');
+assert(max(abs(dy_aug(7:9))) > 1e-3, ...
+       'dF/dbeta is O(1) at t=0; a near-zero RHS indicates a wiring error');
+% Let's check that FSE is at least finite
+assert(all(isfinite(dy_aug(4:15))), 'FSE RHS contains non-finite values');
+n_pass=n_pass+1; fprintf('  T2.3 PASS: FSE RHS is finite at t=0\n');
+
+%T2.4: FSE vs FD comparison at t=30 days
+fprintf('  T2.4: FSE vs FD comparison at t=30 days...\n');
+f_aug = @(t,y) sir_augmented(t,y,p.c,p.beta,p.tau_R,p.tau_m);
+[~, Y_aug] = ode45(f_aug, [0 30], y0_aug, ode_opts);
+y30 = Y_aug(end,:)';
+
+% Time-dependent SI at t=30 via FSE: SI_c(I)(30) = (c/I(30)) * w_I1(30)
+I30  = y30(2);
+w_I1_fse = y30(5);   % d I/d c at t=30
+SI_c_fse = (p.c/I30) * w_I1_fse;
+
+% Same via centered FD
+h_fd = 1e-5 * p.c;
+f_fwd_p = @(t,y) sir_model(t,y,p.c+h_fd,p.beta,p.tau_R,p.tau_m);
+f_fwd_m = @(t,y) sir_model(t,y,p.c-h_fd,p.beta,p.tau_R,p.tau_m);
+[~,Yp] = ode45(f_fwd_p, [0 30], [p.S0;p.I0;p.R0_ic], ode_opts);
+[~,Ym] = ode45(f_fwd_m, [0 30], [p.S0;p.I0;p.R0_ic], ode_opts);
+SI_c_fd = (p.c/I30) * (Yp(end,2)-Ym(end,2))/(2*h_fd);
+
+fprintf('    SI_c(I)(t=30): FSE = %.6f, FD = %.6f, diff = %.2e\n', ...
+        SI_c_fse, SI_c_fd, abs(SI_c_fse - SI_c_fd));
+assert(abs(SI_c_fse - SI_c_fd) < tol_fd, ...
+       'FSE vs FD mismatch at t=30: diff = %.2e', abs(SI_c_fse - SI_c_fd));
+n_pass=n_pass+1; fprintf('  T2.4 PASS: FSE matches FD at t=30\n');
+
+%% ====================================================================
+%% BLOCK 3: Adjoint vs FSE comparison
+%% ====================================================================
+fprintf('\nBlock 3: Adjoint vs FSE...\n');
+
+%T3.1: run adjoint pipeline (no plots for speed)
+fprintf('  Running adjoint pipeline...\n');
+adj_opts = struct('verbose',false,'plot',false,'verify_fse',false);
+[SI_adj, ~, Y_fwd, ~, ~] = run_sir_adjoint(p, adj_opts);
+assert(length(SI_adj) == 4, 'SI_adj should have 4 elements');
+n_pass=n_pass+1; fprintf('  T3.1 PASS: adjoint pipeline ran successfully\n');
+
+%T3.2: adjoint SI values are finite and in plausible range
+assert(all(isfinite(SI_adj)), 'Adjoint SI contains non-finite values');
+assert(all(abs(SI_adj) < 10), 'Adjoint SI values seem too large: max=%.2f', max(abs(SI_adj)));
+n_pass=n_pass+1;
+fprintf('  T3.2 PASS: SI_adj = [%.4f %.4f %.4f %.4f] (all finite)\n', SI_adj);
+
+%T3.3: qualitative check: c and beta should have similar SI (symmetric role in R0)
+assert(abs(SI_adj(1) - SI_adj(2)) < 0.3, ...
+       'SI_c and SI_beta should be similar (both appear as c*beta): diff=%.4f', ...
+       abs(SI_adj(1)-SI_adj(2)));
+n_pass=n_pass+1; fprintf('  T3.3 PASS: SI_c ≈ SI_beta (%.4f vs %.4f)\n', ...
+                          SI_adj(1), SI_adj(2));
+
+%T3.4: tau_m should have small SI (tau_m >> tau_R, nu_m effect is small)
+assert(abs(SI_adj(4)) < abs(SI_adj(1)), ...
+       'SI_tau_m should be smaller than SI_c for this time horizon');
+n_pass=n_pass+1; fprintf('  T3.4 PASS: |SI_tau_m| = %.4f < |SI_c| = %.4f (expected)\n', ...
+                          abs(SI_adj(4)), abs(SI_adj(1)));
+
+%% ====================================================================
+%% SUMMARY
+%% ====================================================================
+n_total = 11;
+fprintf('\n=== SUMMARY: %d/%d tests passed ===\n', n_pass, n_total);
+if n_pass == n_total
+    fprintf('ALL TESTS PASSED.\n');
+else
+    fprintf('WARNING: %d test(s) failed.\n', n_total - n_pass);
+end

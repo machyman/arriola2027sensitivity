@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "This book is in preparation and has not been published. If you use the notebooks or exercises, please cite the work as below and note that details may change."
+type: book
+title: "Foundations of Sensitivity Analysis: From Local to Global Sensitivity"
+authors:
+  - family-names: Arriola
+    given-names: Leon M.
+    affiliation: "University of Wisconsin-Whitewater"
+  - family-names: Hyman
+    given-names: James M.
+    affiliation: "Tulane University"
+    orcid: "https://orcid.org/0000-0001-5247-5794"
+year: 2026
+notes: >
+  In preparation for submission to SIAM (Computational Science and Engineering
+  series). Not submitted, not under review, not accepted for publication. No
+  publisher field is given, because the book has not been accepted by any publisher.
+  Replaces the repository machyman/arriola2026sa.
+keywords:
+  - sensitivity analysis
+  - adjoint methods
+  - Sobol indices
+  - SIR model
+  - uncertainty quantification
+  - mathematical modeling
+  - graduate textbook
+version: "v1_28_0"
+repository-code: "https://github.com/machyman/arriola2027sensitivity"
